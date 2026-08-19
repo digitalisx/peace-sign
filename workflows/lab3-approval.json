@@ -1,0 +1,497 @@
+{
+  "id": "soarLab3Approve1",
+  "name": "Lab 3 — 승인 게이트 (Human-in-the-Loop)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lab3-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "경보 수신",
+      "name": "경보 수신",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -820,
+        340
+      ],
+      "webhookId": "aaaa3333-0000-4000-8000-00000000lab3"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[경보 파싱] ' + s);\n};\n// ───────────────────────────────────────────────────────────\n// [수집] SIEM이 보낸 원본 경보를 플레이북이 쓰기 좋은 공통 필드로 정규화한다.\n// 실제 환경에서는 제품마다 필드명이 제각각이라 이 단계가 반드시 필요하다.\nconst a = $json.body ?? $json;\nL('원본 경보 수신:', a);\n\nconst out = {\n  alert_id: a.alert_id ?? ('ALERT-' + Date.now()),\n  rule:     a.rule     ?? 'unknown-rule',\n  severity: String(a.severity ?? 'medium').toLowerCase(),\n  src_ip:   a.src_ip   ?? a.source_ip ?? '0.0.0.0',\n  host:     a.host     ?? '-',\n  user:     a.user     ?? '-',\n  received_at: new Date().toISOString(),\n};\n\nL(`정규화 완료 → rule=${out.rule} severity=${out.severity} src_ip=${out.src_ip} host=${out.host} user=${out.user}`);\nif (out.src_ip === '0.0.0.0') L('!! 경고: src_ip 를 찾지 못했다. 필드명이 다른 SIEM 인지 확인할 것');\n\nreturn [{ json: { ...out, _log } }];"
+      },
+      "id": "경보 파싱",
+      "name": "경보 파싱",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://lab-target:8080/api/reputation/{{ $json.src_ip }}",
+        "options": {}
+      },
+      "id": "평판 조회 (TI)",
+      "name": "평판 조회 (TI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -420,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[위험도 산정] ' + s);\n};\n// ───────────────────────────────────────────────────────────\n// [판정] 경보 심각도와 외부 평판을 합쳐 위험도를 산정한다.\n// HTTP 노드를 지나면 $json 이 평판 응답으로 바뀌므로, 경보 원본은 이름으로 참조한다.\nconst alert = $('경보 파싱').first().json;\nconst rep   = $json;\n\nconst SEV  = { low: 10, medium: 30, high: 55, critical: 70 };\nconst base = SEV[alert.severity] ?? 30;\n\nL(`경보  : ${alert.rule} · ${alert.host}/${alert.user} · severity=${alert.severity} → 가중치 ${base}`);\nL(`평판  : score=${rep.score} country=${rep.country} asn=${rep.asn} cats=[${(rep.categories || []).join(',')}] internal=${rep.internal === true}`);\n\nconst risk = Math.min(100, Math.round(rep.score * 0.7 + base * 0.5));\nL(`계산  : round(${rep.score} × 0.7 + ${base} × 0.5) = ${risk}`);\n\nconst decision = risk >= 80 ? 'block' : 'close';\nL(`판정  : ${decision}  (임계값 80, 위험도 ${risk})`);\n\nreturn [{\n  json: {\n    ...alert,\n    reputation: rep.score,\n    country: rep.country,\n    asn: rep.asn,\n    categories: (rep.categories || []).join(',') || '-',\n    internal: rep.internal === true,\n    risk_score: risk,\n    decision,\n    rationale: `severity=${alert.severity}(${base}) + reputation=${rep.score} -> risk=${risk}`,\n    _log: [ ...(alert._log || []), ..._log ],\n  }\n}];"
+      },
+      "id": "위험도 산정",
+      "name": "위험도 산정",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.decision }}",
+              "operation": "equal",
+              "value2": "block"
+            }
+          ]
+        }
+      },
+      "id": "자동 차단 대상인가",
+      "name": "자동 차단 대상인가",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/notify",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ level: 'warn', title: '승인 요청 — ' + $json.src_ip + ' 차단 (risk ' + $json.risk_score + ')', text: $json.rule + ' · ' + $json.host + '/' + $json.user       + ' · 평판 ' + $json.reputation + ' ' + $json.country       + ' · 10분 내 응답이 없으면 차단하지 않고 에스컬레이션한다', links: [   { label: '승인 — 차단 실행', url: $execution.resumeUrl + ($execution.resumeUrl.includes('?') ? '&' : '?') + 'decision=approve' },   { label: '거부 — 오탐 종결', url: $execution.resumeUrl + ($execution.resumeUrl.includes('?') ? '&' : '?') + 'decision=deny' } ]}) }}",
+        "options": {}
+      },
+      "id": "승인 요청 알림",
+      "name": "승인 요청 알림",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        200
+      ],
+      "notes": "Wait 노드의 resumeUrl 을 승인/거부 버튼으로 발송",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 10,
+        "resumeUnit": "minutes",
+        "options": {}
+      },
+      "id": "승인 대기",
+      "name": "승인 대기",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        420,
+        200
+      ],
+      "webhookId": "aaaa3344-0000-4000-8000-0000000wait3",
+      "notes": "Human-in-the-Loop · 10분 타임아웃",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[승인 대기] ' + s);\n};\n// ───────────────────────────────────────────────────────────\nconst res = $json;\nconst src = $('위험도 산정').first().json;\nconst q = res.query || null;\nL(`대기 대상: ${src.src_ip} · 위험도 ${src.risk_score}`);\nL(q ? `승인 웹훅 수신 → decision=${q.decision}` : '웹훅 응답 없이 재개됨 → 10분 타임아웃');\nL(q && q.decision === 'approve' ? '→ 승인. 차단을 실행한다'\n  : (q ? '→ 거부. 차단하지 않고 종결한다' : '→ 무응답. 기본 동작(차단 안 함) + 에스컬레이션'));\nreturn [{ json: { ...res, _log: [ ...(res._log || []), ..._log ] } }];"
+      },
+      "id": "승인 응답 로그",
+      "name": "승인 응답 로그",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        200
+      ],
+      "notes": "로그 전용 — 데이터는 그대로 통과시킨다",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.query ? $json.query.decision : 'timeout' }}",
+              "operation": "equal",
+              "value2": "approve"
+            }
+          ]
+        }
+      },
+      "id": "승인되었나",
+      "name": "승인되었나",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        860,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/block",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "ip",
+              "value": "={{ $('위험도 산정').first().json.src_ip }}"
+            },
+            {
+              "name": "reason",
+              "value": "={{ $('위험도 산정').first().json.rule }} / 승인 후 차단"
+            },
+            {
+              "name": "actor",
+              "value": "n8n · Lab3 (승인 기반)"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "차단 실행 (방화벽)",
+      "name": "차단 실행 (방화벽)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/cases",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "alert",
+              "value": "={{ $('위험도 산정').first().json.rule }}"
+            },
+            {
+              "name": "src_ip",
+              "value": "={{ $('위험도 산정').first().json.src_ip }}"
+            },
+            {
+              "name": "host",
+              "value": "={{ $('위험도 산정').first().json.host }}"
+            },
+            {
+              "name": "user",
+              "value": "={{ $('위험도 산정').first().json.user }}"
+            },
+            {
+              "name": "risk_score",
+              "value": "={{ $('위험도 산정').first().json.risk_score }}"
+            },
+            {
+              "name": "verdict",
+              "value": "approved"
+            },
+            {
+              "name": "action",
+              "value": "승인 후 차단 실행"
+            },
+            {
+              "name": "rationale",
+              "value": "={{ $('위험도 산정').first().json.rationale }}"
+            },
+            {
+              "name": "playbook",
+              "value": "Lab3"
+            },
+            {
+              "name": "approver",
+              "value": "analyst@lab"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "케이스 기록 (승인·차단)",
+      "name": "케이스 기록 (승인·차단)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/cases",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "alert",
+              "value": "={{ $('위험도 산정').first().json.rule }}"
+            },
+            {
+              "name": "src_ip",
+              "value": "={{ $('위험도 산정').first().json.src_ip }}"
+            },
+            {
+              "name": "host",
+              "value": "={{ $('위험도 산정').first().json.host }}"
+            },
+            {
+              "name": "user",
+              "value": "={{ $('위험도 산정').first().json.user }}"
+            },
+            {
+              "name": "risk_score",
+              "value": "={{ $('위험도 산정').first().json.risk_score }}"
+            },
+            {
+              "name": "verdict",
+              "value": "={{ $json.query ? 'denied' : 'timeout' }}"
+            },
+            {
+              "name": "action",
+              "value": "={{ $json.query ? '분석가 거부 — 차단하지 않음' : '무응답 타임아웃 — 기본 동작(차단 안 함) + 에스컬레이션' }}"
+            },
+            {
+              "name": "rationale",
+              "value": "={{ $('위험도 산정').first().json.rationale }}"
+            },
+            {
+              "name": "playbook",
+              "value": "Lab3"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "케이스 기록 (거부·타임아웃)",
+      "name": "케이스 기록 (거부·타임아웃)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/cases",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "alert",
+              "value": "={{ $json.rule }}"
+            },
+            {
+              "name": "src_ip",
+              "value": "={{ $json.src_ip }}"
+            },
+            {
+              "name": "host",
+              "value": "={{ $json.host }}"
+            },
+            {
+              "name": "user",
+              "value": "={{ $json.user }}"
+            },
+            {
+              "name": "risk_score",
+              "value": "={{ $json.risk_score }}"
+            },
+            {
+              "name": "verdict",
+              "value": "false_positive"
+            },
+            {
+              "name": "action",
+              "value": "위험도 미달 — 자동 종결"
+            },
+            {
+              "name": "rationale",
+              "value": "={{ $json.rationale }}"
+            },
+            {
+              "name": "playbook",
+              "value": "Lab3"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "케이스 기록 (자동 종결)",
+      "name": "케이스 기록 (자동 종결)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "경보 수신": {
+      "main": [
+        [
+          {
+            "node": "경보 파싱",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "경보 파싱": {
+      "main": [
+        [
+          {
+            "node": "평판 조회 (TI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "평판 조회 (TI)": {
+      "main": [
+        [
+          {
+            "node": "위험도 산정",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "위험도 산정": {
+      "main": [
+        [
+          {
+            "node": "자동 차단 대상인가",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "자동 차단 대상인가": {
+      "main": [
+        [
+          {
+            "node": "승인 요청 알림",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "케이스 기록 (자동 종결)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "승인 요청 알림": {
+      "main": [
+        [
+          {
+            "node": "승인 대기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "승인 대기": {
+      "main": [
+        [
+          {
+            "node": "승인 응답 로그",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "승인 응답 로그": {
+      "main": [
+        [
+          {
+            "node": "승인되었나",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "승인되었나": {
+      "main": [
+        [
+          {
+            "node": "차단 실행 (방화벽)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "케이스 기록 (거부·타임아웃)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "차단 실행 (방화벽)": {
+      "main": [
+        [
+          {
+            "node": "케이스 기록 (승인·차단)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

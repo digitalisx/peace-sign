@@ -1,0 +1,10 @@
+# n8n 로컬 상태 — 계정·실행이력·자격증명. 배포에 포함하지 말 것
+n8n-data/
+
+# Python 가상환경
+ai-soc/.venv/
+__pycache__/
+*.pyc
+
+# 환경변수
+.env

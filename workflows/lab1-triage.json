@@ -1,0 +1,181 @@
+{
+  "id": "soarLab1Triage01",
+  "name": "Lab 1 — 경보 트리아지 (수집→보강→판정→알림)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lab1-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "경보 수신",
+      "name": "경보 수신",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        300
+      ],
+      "webhookId": "aaaa1111-0000-4000-8000-00000000lab1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[경보 파싱] ' + s);\n};\n// ───────────────────────────────────────────────────────────\n// [수집] SIEM이 보낸 원본 경보를 플레이북이 쓰기 좋은 공통 필드로 정규화한다.\n// 실제 환경에서는 제품마다 필드명이 제각각이라 이 단계가 반드시 필요하다.\nconst a = $json.body ?? $json;\nL('원본 경보 수신:', a);\n\nconst out = {\n  alert_id: a.alert_id ?? ('ALERT-' + Date.now()),\n  rule:     a.rule     ?? 'unknown-rule',\n  severity: String(a.severity ?? 'medium').toLowerCase(),\n  src_ip:   a.src_ip   ?? a.source_ip ?? '0.0.0.0',\n  host:     a.host     ?? '-',\n  user:     a.user     ?? '-',\n  received_at: new Date().toISOString(),\n};\n\nL(`정규화 완료 → rule=${out.rule} severity=${out.severity} src_ip=${out.src_ip} host=${out.host} user=${out.user}`);\nif (out.src_ip === '0.0.0.0') L('!! 경고: src_ip 를 찾지 못했다. 필드명이 다른 SIEM 인지 확인할 것');\n\nreturn [{ json: { ...out, _log } }];"
+      },
+      "id": "경보 파싱",
+      "name": "경보 파싱",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ],
+      "notes": "수집·정규화",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "url": "=http://lab-target:8080/api/reputation/{{ $json.src_ip }}",
+        "options": {}
+      },
+      "id": "평판 조회 (TI)",
+      "name": "평판 조회 (TI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -180,
+        300
+      ],
+      "notes": "맥락 보강 — 외부 위협 인텔 조회",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[위험도 산정] ' + s);\n};\n// ───────────────────────────────────────────────────────────\n// [판정] 경보 심각도와 외부 평판을 합쳐 위험도를 산정한다.\n// HTTP 노드를 지나면 $json 이 평판 응답으로 바뀌므로, 경보 원본은 이름으로 참조한다.\nconst alert = $('경보 파싱').first().json;\nconst rep   = $json;\n\nconst SEV  = { low: 10, medium: 30, high: 55, critical: 70 };\nconst base = SEV[alert.severity] ?? 30;\n\nL(`경보  : ${alert.rule} · ${alert.host}/${alert.user} · severity=${alert.severity} → 가중치 ${base}`);\nL(`평판  : score=${rep.score} country=${rep.country} asn=${rep.asn} cats=[${(rep.categories || []).join(',')}] internal=${rep.internal === true}`);\n\nconst risk = Math.min(100, Math.round(rep.score * 0.7 + base * 0.5));\nL(`계산  : round(${rep.score} × 0.7 + ${base} × 0.5) = ${risk}`);\n\nconst decision = risk >= 80 ? 'block' : 'close';\nL(`판정  : ${decision}  (임계값 80, 위험도 ${risk})`);\n\nreturn [{\n  json: {\n    ...alert,\n    reputation: rep.score,\n    country: rep.country,\n    asn: rep.asn,\n    categories: (rep.categories || []).join(',') || '-',\n    internal: rep.internal === true,\n    risk_score: risk,\n    decision,\n    rationale: `severity=${alert.severity}(${base}) + reputation=${rep.score} -> risk=${risk}`,\n    _log: [ ...(alert._log || []), ..._log ],\n  }\n}];"
+      },
+      "id": "위험도 산정",
+      "name": "위험도 산정",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        300
+      ],
+      "notes": "판정 로직",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/notify",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "level",
+              "value": "={{ $json.decision === 'block' ? 'critical' : 'info' }}"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.rule }} — {{ $json.src_ip }} (risk {{ $json.risk_score }})"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.host }} / {{ $json.user }} · 평판 {{ $json.reputation }} · {{ $json.country }} {{ $json.asn }} · 분류 {{ $json.categories }} · 판단: {{ $json.decision }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "분석 결과 알림",
+      "name": "분석 결과 알림",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "notes": "협업 — Slack 대역",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[알림 전송] ' + s);\n};\n// ───────────────────────────────────────────────────────────\nconst res = $json;\nL('알림 시스템 응답:', res);\nL(res.ok ? '→ 전송 성공' : '!! 전송 실패 — 커넥터 상태를 확인할 것');\nL('이 랩은 조회만 하고 끝난다. 아무것도 차단하지 않았다.');\nreturn [{ json: { ...res, _log: [ ...(res._log || []), ..._log ] } }];"
+      },
+      "id": "전송 결과 로그",
+      "name": "전송 결과 로그",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "로그 전용 — 데이터는 그대로 통과시킨다",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "경보 수신": {
+      "main": [
+        [
+          {
+            "node": "경보 파싱",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "경보 파싱": {
+      "main": [
+        [
+          {
+            "node": "평판 조회 (TI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "평판 조회 (TI)": {
+      "main": [
+        [
+          {
+            "node": "위험도 산정",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "위험도 산정": {
+      "main": [
+        [
+          {
+            "node": "분석 결과 알림",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "분석 결과 알림": {
+      "main": [
+        [
+          {
+            "node": "전송 결과 로그",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

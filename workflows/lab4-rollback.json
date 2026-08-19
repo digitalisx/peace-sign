@@ -1,0 +1,150 @@
+{
+  "id": "soarLab4Rollbk01",
+  "name": "Lab 4 — 롤백 (차단 해제)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lab-unblock",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "롤백 요청 수신",
+      "name": "롤백 요청 수신",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ],
+      "webhookId": "aaaa4444-0000-4000-8000-00000000lab4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[대상 IP 추출] ' + s);\n};\n// ───────────────────────────────────────────────────────────\n// [롤백] 잘못 내려간 차단을 되돌린다.\n// 파급이 큰 액션에는 반드시 되돌리는 경로를 함께 만들어 둔다.\nconst b = $json.body ?? $json;\nL('롤백 요청 수신:', b);\nif (!b.ip) L('!! ip 가 비어 있다 — 요청 본문을 확인할 것');\nL(`대상 ${b.ip} 의 차단을 해제한다`);\nreturn [{ json: { ip: b.ip, reason: b.reason ?? '오탐 확인 — 차단 해제', _log } }];"
+      },
+      "id": "대상 IP 추출",
+      "name": "대상 IP 추출",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://lab-target:8080/api/block/{{ $json.ip }}",
+        "options": {}
+      },
+      "id": "차단 해제 (방화벽)",
+      "name": "차단 해제 (방화벽)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 로그 헬퍼 ───────────────────────────────────────────────\n// L(...) 로 남긴 기록은 두 곳에서 보인다.\n//   1) 편집 화면에서 이 노드를 실행하면  → 출력 패널의 'Logs' 탭 (console.log)\n//   2) 모든 실행 (프로덕션 포함)         → 출력 데이터의 _log 필드\nconst _log = [];\nconst L = (...a) => {\n  const s = a.map(v => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' ');\n  _log.push(s);\n  console.log('[차단 해제] ' + s);\n};\n// ───────────────────────────────────────────────────────────\nconst res = $json;\nL('방화벽 응답:', res);\nL(res.removed ? `→ ${res.removed.ip} 차단 해제 완료` : '→ 차단 목록에 없던 IP 다 (멱등 — 재시도해도 안전)');\nreturn [{ json: { ...res, _log: [ ...(res._log || []), ..._log ] } }];"
+      },
+      "id": "롤백 결과 로그",
+      "name": "롤백 결과 로그",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        160
+      ],
+      "notes": "로그 전용 — 데이터는 그대로 통과시킨다",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://lab-target:8080/api/notify",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "level",
+              "value": "warn"
+            },
+            {
+              "name": "title",
+              "value": "=차단 해제 — {{ $('대상 IP 추출').first().json.ip }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('대상 IP 추출').first().json.reason }} · 롤백 완료"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "롤백 알림",
+      "name": "롤백 알림",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "롤백 요청 수신": {
+      "main": [
+        [
+          {
+            "node": "대상 IP 추출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "대상 IP 추출": {
+      "main": [
+        [
+          {
+            "node": "차단 해제 (방화벽)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "차단 해제 (방화벽)": {
+      "main": [
+        [
+          {
+            "node": "롤백 결과 로그",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "롤백 결과 로그": {
+      "main": [
+        [
+          {
+            "node": "롤백 알림",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}
